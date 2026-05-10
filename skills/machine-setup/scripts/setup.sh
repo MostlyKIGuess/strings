@@ -53,19 +53,19 @@ done
 scripts_dir="$(dirname "$0")"
 
 emit_summary() {
-  local status="$1" lasterr="$2"
+  local ok="$1" message="$2"
   local bundle
   bundle="$(machine_field "$name" "bundleVersion" 2>/dev/null || printf '')"
   jq -n \
     --arg n "$name" \
-    --arg s "$status" \
+    --argjson ok "$ok" \
     --arg b "$bundle" \
-    --arg e "$lasterr" \
+    --arg m "$message" \
     '{
+       ok:            $ok,
        name:          $n,
-       status:        $s,
        bundleVersion: (if $b == "" then null else $b end),
-       lastError:     (if $e == "" then null else $e end)
+       message:       (if $m == "" then null else $m end)
      }'
 }
 
@@ -80,7 +80,7 @@ else
     log "[1/3] adding machine with explicit flags"
   fi
   if ! bash "$scripts_dir/add.sh" "$name" "${add_args[@]}" >&2; then
-    emit_summary "error" "add.sh failed"
+    emit_summary false "add.sh failed"
     exit 1
   fi
 fi
@@ -88,19 +88,15 @@ fi
 # Step 2 — reconnect-ssh (idempotent).
 log "[2/3] opening SSH ControlMaster"
 if ! bash "$scripts_dir/reconnect-ssh.sh" "$name" >&2; then
-  emit_summary "error" "reconnect-ssh.sh failed"
+  emit_summary false "reconnect-ssh.sh failed"
   exit 1
 fi
 
 # Step 3 — install plane + kimi.
 log "[3/3] installing plane + kimi bundle (may take several minutes on a cold machine)"
 if ! bash "$scripts_dir/install.sh" "$name" >&2; then
-  status="$(machine_field "$name" "status")"
-  lasterr="$(machine_field "$name" "lastError")"
-  emit_summary "${status:-error}" "${lasterr:-install.sh failed}"
+  emit_summary false "install.sh failed (see ~/.openscientist/machines/$name.lasterror)"
   exit 2
 fi
 
-status="$(machine_field "$name" "status")"
-lasterr="$(machine_field "$name" "lastError")"
-emit_summary "$status" "$lasterr"
+emit_summary true ""

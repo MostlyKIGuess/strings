@@ -75,13 +75,6 @@ if ! with_timeout 15 "ssh-probe" -- ssh_run "$NAME" -q -- "uname -a"; then
   exit 1
 fi
 
-# Mark setup-complete if currently unprovisioned.
-current_status="$(machine_field "$NAME" "status")"
-if [[ "$current_status" == "unprovisioned" ]]; then
-  index_update "$NAME" '. + {status:"setup-complete"}'
-  emit_progress info "status" "marked setup-complete"
-fi
-
 # Bump index.json mtime so Electron's fs.watch fires and re-adds forwards.
 touch "$INDEX_PATH"
 

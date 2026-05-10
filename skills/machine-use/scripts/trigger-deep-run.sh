@@ -114,15 +114,106 @@ session_id="$(rand_hex 4)"
 log "machine=$machine provider=$provider session-id=$session_id agent=$agent"
 
 # ---- 1) Sync + create worktree (uniform for local and remote) --------------
+# Inlined from the former sync-repo.sh — primitive, only ever called from
+# here. See sync-space.sh for the chat-shaped sibling (per-space worktree,
+# stash-dance idempotent re-sync) which is still its own script because its
+# caller is JS, not bash.
 
 SCRIPTS_DIR="$(dirname "$0")"
-sync_out="$("$SCRIPTS_DIR/sync-repo.sh" "$machine" --path "$path" --session-id "$session_id")" || \
-  die "sync-repo.sh failed (see stderr above)"
 
-worktree="$(jq -r '.worktreePath // empty' <<<"$sync_out")"
-branch="$(jq -r '.branch // "DETACHED"' <<<"$sync_out")"
-dirty="$(jq -r '.dirty // false' <<<"$sync_out")"
-[[ -z "$worktree" ]] && die "sync-repo.sh produced no worktreePath"
+# Resolve git root from the given path.
+[[ -d "$path" ]] || die "path not a directory: $path"
+abs_path="$(cd "$path" && pwd)"
+repo_root="$(cd "$abs_path" && git rev-parse --show-toplevel 2>/dev/null)" || \
+  die "not inside a git repo: $abs_path"
+cd "$repo_root"
+
+repo_id="$(printf '%s' "$repo_root" | sha256sum | head -c16)"
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo DETACHED)"
+base_commit="$(git rev-parse HEAD 2>/dev/null)" || die "repo has no HEAD"
+
+# Dirty-tree-safe snapshot. `git stash create` exits 0 with empty stdout when
+# the tree is clean — fall through to HEAD in that case.
+snapshot="$(git stash create 2>/dev/null || true)"
+if [[ -n "$snapshot" ]]; then
+  dirty="true"
+else
+  dirty="false"
+  snapshot="$base_commit"
+fi
+
+if [[ "$machine" == "local" ]]; then
+  wt_base="$HOME/.openscientist/worktrees"
+  mkdir -p "$wt_base"
+  worktree="$wt_base/$session_id"
+  [[ -e "$worktree" ]] && die "worktree path already exists: $worktree (pick a new session-id)"
+
+  log "local worktree: $worktree @ ${snapshot:0:12} (dirty=$dirty) [detached]"
+  # --detach deliberately: local worktrees share the laptop's .git; naming a
+  # branch per session would pollute the user's branch list. The branch is
+  # created lazily on pull-back by fetch-session-branch.sh.
+  git worktree add --detach "$worktree" "$snapshot" >&2 || die "git worktree add failed"
+else
+  if ! ssh_master_alive "$machine"; then
+    log "ControlMaster down; reopening ..."
+    "$SCRIPTS_DIR/reconnect-ssh.sh" "$machine" >/dev/null
+  fi
+  mapfile -t opts < <(ssh_base_opts "$machine")
+  target="$(ssh_target "$machine")"
+  sock="$(ssh_sock "$machine")"
+  host="$(machine_field "$machine" "ssh.host")"
+  user="$(machine_field "$machine" "ssh.user")"
+  port="$(machine_field "$machine" "ssh.port")"; [[ -z "$port" ]] && port=22
+
+  remote_home="$(machine_field "$machine" "remote.home")"
+  if [[ -z "$remote_home" || "$remote_home" == "null" ]]; then
+    remote_home="$(ssh "${opts[@]}" "$target" 'printf %s "$HOME"')"
+    [[ -z "$remote_home" ]] && die "could not resolve remote \$HOME"
+    write_index "$(jq_index --arg n "$machine" --arg h "$remote_home" \
+      '.machines[$n].remote.home = $h')"
+  fi
+
+  bare="$remote_home/.openscientist/repos/$repo_id/bare.git"
+  worktree="$remote_home/.openscientist/worktrees/$session_id"
+  ref="refs/heads/_osci-session/$session_id"
+
+  log "repo_id=$repo_id  branch=$branch  dirty=$dirty"
+  log "remote bare:     $bare"
+  log "remote worktree: $worktree"
+
+  # Ensure bare repo exists (idempotent).
+  ssh "${opts[@]}" "$target" "
+    set -e
+    if [ ! -d '$bare' ]; then
+      mkdir -p '$(dirname "$bare")'
+      git init --bare --quiet '$bare'
+    fi
+  " || die "failed to prepare bare repo on remote"
+
+  # Push the snapshot to the per-session ref over the multiplexed master.
+  # -o ControlMaster=no → join existing master, don't create one.
+  if [[ "$port" == "22" ]]; then
+    push_url="ssh://$user@$host$bare"
+  else
+    push_url="ssh://$user@$host:$port$bare"
+  fi
+  log "git push $push_url  $ref"
+  GIT_SSH_COMMAND="ssh -o ControlPath=$sock -o ControlMaster=no -o BatchMode=yes" \
+    git push --force --quiet "$push_url" "$snapshot:$ref" || die "git push failed"
+
+  # Materialize the worktree on remote from that ref.
+  ssh "${opts[@]}" "$target" "
+    set -e
+    if [ -e '$worktree' ]; then
+      echo 'worktree path already exists on remote; pick a new session-id' >&2
+      exit 1
+    fi
+    mkdir -p '$(dirname "$worktree")'
+    git --git-dir='$bare' worktree add -B 'osci/$session_id' --quiet '$worktree' '$ref'
+  " || die "remote worktree add failed at $worktree"
+fi
+
+[[ -z "$worktree" ]] && die "worktree path was not set"
 log "worktree: $worktree (branch=$branch dirty=$dirty)"
 
 # ---- 2) Build plane payload -------------------------------------------------

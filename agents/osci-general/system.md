@@ -143,7 +143,7 @@ If the user asks a one-shot question that needs a sandboxed tool and doesn't war
 The machine surface is split into two sibling skills:
 
 - **`machine-setup`** — lifecycle: `add.sh`, `setup.sh`, `install.sh`, `setup-claude.sh`, `setup-codex.sh`, `uninstall.sh`, `remove.sh`. Reach for it whenever the user asks to **add, connect, provision, set up, install, bring up, or retire** a machine.
-- **`machine-use`** — operating an already-provisioned machine: `list.sh`, `show.sh`, `active.sh`, `activate.sh`, `deactivate.sh`, `status.sh`, `reconnect-ssh.sh`, `trigger-deep-run.sh`, `sync-repo.sh`, `fetch-session-branch.sh`. Reach for it whenever the user wants to switch active machine, diagnose why runs aren't updating, repair a tunnel, spawn a deep run, or claim a finished run's result.
+- **`machine-use`** — operating an already-provisioned machine: `list.sh`, `show.sh`, `verify.sh`, `reconnect-ssh.sh`, `sync-space.sh`, `trigger-deep-run.sh`, `fetch-session-branch.sh`, `install-claude.sh`, `install-codex.sh`. Reach for it whenever the user wants to diagnose machine reachability, repair a tunnel, spawn a deep run, install a provider CLI on a remote, or claim a finished run's result.
 
 Both skills read and write the same `~/.openscientist/machines/index.json`, and `machine-setup` calls into `machine-use/scripts/reconnect-ssh.sh` for the SSH primitive. Read the SKILL.md of whichever applies via `curl -fsS "$PLANE_SERVER_URL/skills/<name>/SKILL.md"`, then run its scripts as shown in `# Skills`.
 

@@ -10,9 +10,20 @@ category: infrastructure
 
 Use the machines that have already been set up to run deep runs.
 
-This skill is the **runtime complement** to `machine-setup`. After `machine-setup/setup.sh` lands a machine at `status: "ready"`, every later interaction — listing, activating, status probes, reopening dropped tunnels, triggering deep runs, claiming results — happens through this skill. Lifecycle changes (register, install plane + kimi, install provider CLIs, uninstall, remove from registry) live in `machine-setup`.
+> **Status (2026-05) — index.json is now persistent provisioning only.**
+> `status`, `lastError`, `lastProviderError`, `lastVerifiedAt`, and the
+> top-level `active` pointer are no longer written. Reachability is the live
+> SSH-bridge probe driven by the renderer (boot + every 20 s). `verify.sh`
+> gates on **plane** reachability only; ssh / kimi probe results are
+> diagnostic. The renderer holds the active-machine selection in memory and
+> always boots on Local. Sections below that talk about the six-state
+> machine, `lastVerifiedAt` mirroring, or `status="ready"` as a precondition
+> are superseded — the only persistent gates left are "machine exists in
+> index" and "bundleVersion is set" (a successful install).
 
-A **machine** is a remote Linux box (or the laptop itself, reserved name `local`) that hosts the OpenScientist agent stack: the plane server (HTTP API on port 5495), the kimi-server (HTTP API on port 5494), and zero or more external provider CLIs (claude, codex). When a machine is **active**, the Electron app opens an SSH tunnel from the laptop so the UI can poll it as if it were local.
+This skill is the **runtime complement** to `machine-setup`. Listing, opening / closing the SSH ControlMaster, verify probes, per-space repo sync, deep-run dispatch, and provider CLI installs happen through this skill. Base lifecycle (register, provision kimi+plane, retire) lives in `machine-setup`.
+
+A **machine** is a remote Linux box (or the laptop itself, reserved name `local`) that hosts the OpenScientist agent stack: the plane server (HTTP API on port 5495), the kimi-server (HTTP API on port 5494), and zero or more external provider CLIs (claude, codex). When a machine is selected in the renderer, Electron opens an SSH tunnel from the laptop so the UI can poll it as if it were local.
 
 This skill follows the contracts in `frontend/docs/machine-provisioning-spec.md`. Read that doc for the design rationale.
 
@@ -111,19 +122,15 @@ All scripts live in `scripts/`. Per the universal contract (spec §3): single po
 
 | Script | Purpose |
 |---|---|
-| `list.sh` | Print all machines (name, status). |
+| `list.sh` | Print all machines (name + persistent fields). No live state. |
 | `show.sh <name>` | Dump one machine's full record. |
-| `verify.sh <name> [--kimi-port P] [--plane-port P]` | **Canonical health probe** (spec §4.5). Read-only. Three calling patterns: flags > `<name>.ports.json` snapshot > remote-loopback fallback. JSON outcome includes `ssh.ok`, `kimi.ok`, `plane.ok`, `providers.{claude,codex}`, `via`, `verifiedAt`. Used by Electron's machine selector probe, by `install.sh`'s last gate, and for manual diagnostics. |
-| `status.sh` | **Deprecated** — exec's verify.sh (spec §4.7). Kept as a back-compat shim for one release. New code should call verify.sh directly. |
-| `activate.sh <name>` | Asserts provisioning state + master health. Renderer's `desktop:machines-activate` IPC routes through Electron main's `cloudRun.activateMachine` (pure JS; this script is the user-facing skill entry, not the renderer path). |
-| `deactivate.sh` | Closes ControlMaster on demand. |
+| `verify.sh <name> [--kimi-port P] [--plane-port P]` | **Canonical health probe.** Read-only. Three calling patterns: flags > `<name>.ports.json` snapshot > remote-loopback fallback. Gates on **plane** reachability only (`ok=true` iff plane `/healthz` returned 200); ssh + kimi probe results are returned for diagnostics. Used by Electron's machine-selector boot probe (every 20 s while machines are registered) and for manual diagnostics. |
 | `reconnect-ssh.sh <name>` | Reopen the ControlMaster if it has dropped. (Duplicated in `machine-setup`.) |
-| `install-claude.sh <name>` | Install Claude Code CLI on a remote machine. Requires `status="ready"`. Failed install does NOT demote the machine to broken — sets `services.providers.claude.installed=false` and `lastProviderError.claude={stage,message,ts}`. Idempotent: rerun re-runs the smoke test. |
+| `install-claude.sh <name>` | Install Claude Code CLI on a remote machine. Failed install sets `services.providers.claude.installed=false`. Idempotent: rerun re-runs the smoke test. |
 | `install-codex.sh <name>` | Mirror of install-claude.sh for the Codex CLI. |
-| `sync-space.sh <name> --space-id ID --path P` | Per-space worktree sync. Mirrors `sync-repo.sh` but persistent per-space. Self-heals missing `remote.home` from SSH `$HOME`. Soft-skips no-HEAD and not-a-git-repo with `mode:"skipped"` (renderer renders as info toast). |
-| `trigger-deep-run.sh --provider P --prompt X --path DIR [--machine M] [--agent A] [--title T] [--spawned-by-session SID] [--spawned-by-role ROLE]` | **The only correct way to spawn a deep run.** Owns worktree prep end-to-end: calls `sync-repo.sh` internally, then POSTs to plane. Both the gecko agent and Electron main (for UI-initiated runs) call this. |
-| `sync-repo.sh <name> --path P --session-id SID` | Primitive invoked by `trigger-deep-run.sh`. Per-session snapshot push to shared bare repo on remote. Rarely called directly. |
-| `fetch-session-branch.sh --session-id SID --path LAPTOP_REPO [--machine M] [--branch NAME]` | **Claim** a deep run's result via `osci/<sid>` in the laptop's `.git`. For remote runs: fetches the branch over the existing ControlMaster. For local runs: `git branch -f osci/<sid> <sha>` from plane's reported HEAD. |
+| `sync-space.sh <name> --space-id ID --path P` | Per-space worktree sync used by chat. Mirrors the laptop space repo onto a long-lived per-space remote worktree at `<remote.spacesRoot>/<space_id>`. Idempotent: stash → reset --hard → stash pop preserves uncommitted remote-side work across syncs. Called from Electron's `ensureSpaceOnMachine` IPC every time chat creates a session. |
+| `trigger-deep-run.sh --provider P --prompt X --path DIR [--machine M] [--agent A] [--title T] [--spawned-by-session SID] [--spawned-by-role ROLE]` | **The only correct way to spawn a deep run.** Owns worktree prep end-to-end: inlines a per-session worktree push (the deep-run sibling of `sync-space.sh`), then POSTs to plane. Both the gecko agent and Electron main (for UI-initiated runs) call this. |
+| `fetch-session-branch.sh --session-id SID --path LAPTOP_REPO --machine M [--branch NAME]` | **Claim** a deep run's result via `osci/<sid>` in the laptop's `.git`. `--machine` is required (use `local` for laptop-side runs). For remote runs: fetches the branch over the existing ControlMaster. For local runs: `git branch -f osci/<sid> <sha>` from plane's reported HEAD. |
 
 ### Shared helpers (`_lib/provisioning.sh`)
 
@@ -137,7 +144,7 @@ New scripts source `skills/_lib/provisioning.sh` (spec §11). It provides:
 - `ssh_pipe <name> [--env KEY=VAL ...] -- <local-script>` — pipe a local script over `ssh bash -s` with explicit env injection (the spec §4.2.2 contract).
 - `log_open <script>` / `remote_log_tail <name> <log-path> [<lines>]` — remote log creation + post-mortem fetch.
 
-The legacy `_common.sh` is being phased out as scripts migrate. New scripts should use `_lib/provisioning.sh`; older scripts (sync-repo.sh, trigger-deep-run.sh, list.sh, show.sh, fetch-session-branch.sh) still source `_common.sh` until they're migrated.
+The legacy `_common.sh` is being phased out as scripts migrate. New scripts should use `_lib/provisioning.sh`; older scripts (trigger-deep-run.sh, list.sh, show.sh, fetch-session-branch.sh) still source `_common.sh` until they're migrated. Note: `_common.sh` no longer exposes an `active_machine` helper — there is no `.active` field in `index.json` (the renderer holds active selection in memory).
 
 ## Workflows
 
@@ -158,9 +165,7 @@ bash $SCRIPTS/verify.sh osci-math         # health probe (read-only)
 
 ### Switch active machine
 
-In day-to-day operation, the user clicks a machine in the renderer's selector and the Electron app handles activate/deactivate via `cloudRun.activateMachine`. The selector enables only `ready` machines whose latest probe has `kimiReachable=true`.
-
-For scripted/CLI flows, you can call `activate.sh` / `deactivate.sh` directly — they assert provisioning state and ControlMaster health.
+The user clicks a machine in the renderer's selector and the Electron app handles SSH-tunnel open/close via `cloudRun.activateMachine` / `cloudRun.deactivateMachine`. The selector enables only machines whose latest boot probe shows `planeReachable=true`. There is no longer a CLI `activate.sh` / `deactivate.sh` — if you need to drive the tunnel by hand, use `reconnect-ssh.sh <name>` (open) and `ssh -O exit -S ~/.openscientist/ssh/<name>.sock check-<name>` (close).
 
 ### Runs aren't updating in the sidebar
 
@@ -270,9 +275,9 @@ Stderr carries step-by-step progress (`machine=…`, `local worktree: …`, `git
 
 #### What `trigger-deep-run.sh` does under the hood
 
-1. Resolves target machine (explicit `--machine`, or `active.sh`).
+1. Resolves target machine: explicit `--machine`, defaults to `local`. (There is no `.active` field in `index.json`; the renderer is responsible for passing the user's selected machine when initiating a run from the UI.)
 2. Generates a random 8-hex session id.
-3. Calls `sync-repo.sh <machine> --path $PATH --session-id <sid>`:
+3. Inlines the per-session worktree push (the deep-run sibling of `sync-space.sh`):
    - Local: `git worktree add --detach` from a `git stash create` snapshot. Deliberately detached — see the "Local worktrees are detached by design" note under "Where things live".
    - Remote: `git init --bare` on remote if absent → `git push` the stash-snapshot to `refs/heads/_osci-session/<sid>` over the existing SSH ControlMaster (via `GIT_SSH_COMMAND` with `-o ControlPath=$sock`) → `git worktree add -B "osci/<sid>"` on remote. Remote commits land on that branch and are fetched back to the laptop by `fetch-session-branch.sh`.
 4. POSTs `/orchestrator/start` to plane:
@@ -286,11 +291,11 @@ On a remote there is **one bare repo per `(machine × repo)`** at `~/.openscient
 
 #### What if the tree is dirty
 
-`sync-repo.sh` uses `git stash create` under the hood: a floating commit capturing the index + working tree without touching your branches or stash list. That SHA is pushed to the per-session ref; the remote worktree checks out exactly what the laptop looked like at trigger time, uncommitted hunks included. If the tree is clean, the script falls through to HEAD transparently.
+`trigger-deep-run.sh`'s sync step uses `git stash create` under the hood: a floating commit capturing the index + working tree without touching your branches or stash list. That SHA is pushed to the per-session ref; the remote worktree checks out exactly what the laptop looked like at trigger time, uncommitted hunks included. If the tree is clean, the script falls through to HEAD transparently.
 
 #### Calling from Electron main (UI path)
 
-The same script is invoked from Electron main via `child_process.execFile("bash", [synced_path, "--provider", ...])`. The `synced_path` resolves to `<work_dir>/.openscientist/skills/machine-use/scripts/trigger-deep-run.sh`, which is autosynced from the backend world-model on chat start (space root as work_dir) and every deep-run worktree creation. UI callers parse the JSON on stdout and stream stderr to a progress display (deferred to a later iteration).
+The same script is invoked from Electron main via `child_process.execFile("bash", [synced_path, "--provider", ...])`. The `synced_path` resolves to `<work_dir>/.openscientist/skills/machine-use/scripts/trigger-deep-run.sh`, which is autosynced from the `fuzzy-dynamics/strings` checkout (`~/.openscientist/strings/`) on chat start (space root as work_dir) and every deep-run worktree creation. UI callers parse the JSON on stdout and stream stderr to a progress display (deferred to a later iteration).
 
 ### Claim a deep run's result
 

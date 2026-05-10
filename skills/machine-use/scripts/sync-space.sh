@@ -7,9 +7,10 @@
 # stash → reset --hard <new ref> → stash pop so any uncommitted remote-side
 # work survives the sync.
 #
-# Reuses sync-repo.sh's bare-repo-per-(repo_id) layout: one bare per laptop
-# repo per machine, content-addressed by sha256 of the laptop's absolute path.
-# Deep runs and chat sessions for the same space share the same bare.
+# Reuses the bare-repo-per-(repo_id) layout used by trigger-deep-run.sh's
+# sync step: one bare per laptop repo per machine, content-addressed by
+# sha256 of the laptop's absolute path. Deep runs and chat sessions for the
+# same space share the same bare.
 #
 # Direction is one-way local → remote. Pull-back stays explicit via
 # fetch-session-branch.sh / the UI's Checkout button (same as deep runs).
@@ -65,8 +66,9 @@ cd "$repo_root"
 repo_id="$(printf '%s' "$repo_root" | sha256sum | head -c16)"
 base_commit="$(git rev-parse HEAD 2>/dev/null)" || die "repo has no HEAD"
 
-# Capture local working state (uncommitted changes included) — same trick as
-# sync-repo.sh. `git stash create` exits 0 with empty stdout when clean.
+# Capture local working state (uncommitted changes included) — same trick
+# trigger-deep-run.sh uses. `git stash create` exits 0 with empty stdout when
+# the tree is clean.
 snapshot="$(git stash create 2>/dev/null || true)"
 [[ -z "$snapshot" ]] && snapshot="$base_commit"
 

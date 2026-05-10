@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # show.sh <name> — print full record for one machine.
+#
+# Reports persistent provisioning record only. Live reachability is the
+# renderer's job (boot probe + bridge state); this script does not surface it.
 source "$(dirname "$0")/_common.sh"
 ensure_index
 
@@ -7,10 +10,9 @@ name="${1:-}"
 [[ -z "$name" ]] && die "usage: show.sh <name>"
 
 if [[ "$name" == "local" ]]; then
-  jq -n --arg a "$(active_machine)" '{name:"local", status:"ready", active:($a == "local")}'
+  jq -n '{name:"local"}'
   exit 0
 fi
 
 machine_exists "$name" || die "no such machine: $name"
-active="$(active_machine)"
-machine_get "$name" | jq --arg n "$name" --arg a "$active" '. + {name: $n, active: ($n == $a)}'
+machine_get "$name" | jq --arg n "$name" '. + {name: $n}'

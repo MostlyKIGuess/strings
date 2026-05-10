@@ -10,7 +10,17 @@ category: infrastructure
 
 Provision, install, and retire the machines that run deep runs.
 
-This skill is the lifecycle complement to `machine-use`. After `setup.sh` lands `status: "ready"`, switch to `machine-use` for activation, verify, sync-space, deep runs, **and provider CLI installs**.
+> **Status (2026-05) — index.json holds persistent provisioning facts only.**
+> The `status` / `lastError` / `lastProviderError` / `lastVerifiedAt` fields and
+> the top-level `active` pointer have been removed. Reachability is probed at
+> runtime by the renderer (boot probe + 20 s periodic). `mark_broken` still
+> writes `~/.openscientist/machines/<name>.lasterror` (the forensic trail) and
+> emits the structured failure JSON on stdout, but does NOT touch index.json.
+> Sections below that mention the six-state machine, the reaper, or the
+> `status` field as the dropdown gate are superseded — read the renderer's
+> `desktop:machine-bridge-state` event for live state.
+
+This skill is the lifecycle complement to `machine-use`. `setup.sh` registers + provisions in one shot; `machine-use` then runs day-to-day operations.
 
 A **machine** is a remote Linux box (or the laptop itself, reserved name `local`) that hosts the OpenScientist agent stack: the plane server (HTTP API on port 5495), the kimi-server (HTTP API on port 5494), and zero or more provider CLIs (claude, codex) installed separately via `machine-use/install-claude.sh` / `install-codex.sh`.
 
@@ -105,12 +115,11 @@ bash $SCRIPTS/setup.sh osci-math
 
 `setup.sh` defaults to `--from-ssh-config <name>`, so any machine in `~/.ssh/config` works with no further input. Pass `--host H --user U --key K [--port P]` to override or supply missing fields.
 
-After `setup.sh` exits 0 with `"status":"ready"`, ask what's next:
+After `setup.sh` exits 0 with `"ok":true`, ask what's next:
 
 - "Want me to install Claude Code or Codex on this machine? Each is opt-in." → `machine-use` provider scripts.
-- "Want me to activate this machine in the renderer?" → `machine-use/activate.sh` (which the renderer triggers automatically on selection anyway).
 
-Do **not** silently chain provider installs.
+The renderer opens the SSH ControlMaster automatically when the user picks the machine in the selector — there is no separate activate step for the agent to perform. Do **not** silently chain provider installs.
 
 ### Reading structured outcomes
 

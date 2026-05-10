@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # remove.sh <name> [--force]
-# Deletes a machine from index.json. Refuses if it's active or ready unless
-# --force is passed. Does NOT touch the remote — use uninstall.sh first if you
-# want to clean up there.
+# Deletes a machine from index.json. Refuses if it has a `bundleVersion`
+# (i.e. install.sh ran successfully) unless --force is passed — that's the
+# only persistent signal we keep that says "the remote was actually
+# provisioned". Does NOT touch the remote — run uninstall.sh first to clean
+# up there.
 source "$(dirname "$0")/_common.sh"
 ensure_index
 
@@ -21,18 +23,13 @@ done
 machine_exists "$name" || die "no such machine: $name"
 
 if [[ "$force" -ne 1 ]]; then
-  active="$(active_machine)"
-  [[ "$active" == "$name" ]] && die "$name is the active machine; deactivate first or use --force"
-  status="$(machine_field "$name" "status")"
-  [[ "$status" == "ready" || "$status" == "degraded" ]] && \
-    die "$name has status=$status (uninstall first or use --force)"
+  bundle="$(machine_field "$name" "bundleVersion")"
+  if [[ -n "$bundle" && "$bundle" != "null" ]]; then
+    die "$name has bundleVersion=$bundle (run uninstall.sh first or pass --force)"
+  fi
 fi
 
-# If removing the active machine with --force, also clear active.
-updated="$(jq_index --arg n "$name" '
-  if .active == $n then .active = "local" else . end
-  | del(.machines[$n])
-')"
+updated="$(jq_index --arg n "$name" 'del(.machines[$n])')"
 write_index "$updated"
 
 # Clean the dangling ssh socket if any.

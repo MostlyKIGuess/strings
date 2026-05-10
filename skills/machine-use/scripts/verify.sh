@@ -16,12 +16,15 @@
 # Output (stdout, single JSON):
 #   {"ok":bool,"name":"...","via":"bridge|remote-loopback",
 #    "ssh":{"ok":bool},"kimi":{"ok":bool,"latencyMs":N},"plane":{...},
-#    "providers":{"claude":{...}|null,"codex":{...}|null},
 #    "verifiedAt":"..."}
 #
+# Gate is **plane only** — plane is the supervisor and the renderer's
+# selectability signal. ssh and kimi results are returned for diagnostics
+# but do not affect ok / exit code.
+#
 # Exit codes:
-#   0  ok=true  AND  ssh+kimi+plane all reachable
-#   1  ok=false (any of ssh/kimi/plane failed)
+#   0  ok=true  (plane /healthz returned 200)
+#   1  ok=false
 #   2  arg error
 
 set -euo pipefail
@@ -117,37 +120,18 @@ probe_remote_healthz() {
   return 1
 }
 
-probe_provider() {
-  local cmd="$1"
-  # Provider CLIs are installed under ~/.local/bin (per install-{claude,codex}.sh
-  # using --prefix=~/.local). Non-interactive ssh sessions don't get that on
-  # PATH by default, so probe by absolute path. Falls back to PATH lookup if
-  # the binary is somehow elsewhere.
-  local probe='V=$($HOME/.local/bin/'"$cmd"' --version 2>/dev/null) || V=$('"$cmd"' --version 2>/dev/null) || true; printf "%s" "$V"'
-  local version
-  if version=$(ssh_run "$NAME" -q -- "$probe" 2>/dev/null); then
-    version=$(printf '%s' "$version" | head -1 | tr -d '\r\n')
-    if [[ -n "$version" ]]; then
-      jq -nc --arg v "$version" '{ok:true,version:$v}'
-      return
-    fi
-  fi
-  jq -nc '{ok:false,version:null}'
-}
-
 # ── stages ───────────────────────────────────────────────────────────────────
 
-# 1. ssh-master
+# 1. ssh-master (informational; plane reachability is the gate)
 ssh_ok=false
 if ssh_master_alive "$NAME"; then ssh_ok=true; fi
 
-# 2/3. kimi/plane healthz
+# 2/3. plane (primary) + kimi (informational) healthz
 kimi_json='{"ok":false,"latencyMs":null}'
 plane_json='{"ok":false,"latencyMs":null}'
 
 if [[ "$ssh_ok" == "true" ]]; then
   if [[ "$VIA" == "bridge" ]]; then
-    # Try bridge-mode first; if it fails, fall through to remote-loopback.
     if k=$(probe_localhost_healthz "$KIMI_PORT") 2>/dev/null; then kimi_json="$k"; fi
     if p=$(probe_localhost_healthz "$PLANE_PORT") 2>/dev/null; then plane_json="$p"; fi
     # Auto-fallback if the bridge probes both failed.
@@ -163,28 +147,15 @@ if [[ "$ssh_ok" == "true" ]]; then
   fi
 fi
 
-# 4/5. providers (only if installed)
-claude_json="null"
-codex_json="null"
-if [[ "$ssh_ok" == "true" ]]; then
-  ensure_index
-  claude_installed="$(machine_field "$NAME" 'services.providers.claude.installed' 2>/dev/null || true)"
-  codex_installed="$(machine_field "$NAME" 'services.providers.codex.installed' 2>/dev/null || true)"
-  if [[ "$claude_installed" == "true" ]]; then
-    claude_json="$(probe_provider claude)"
-  fi
-  if [[ "$codex_installed" == "true" ]]; then
-    codex_json="$(probe_provider codex)"
-  fi
-fi
-
 # ── compose output ───────────────────────────────────────────────────────────
+#
+# Gate on plane only. Plane is the supervisor — if it answers, the machine is
+# usable for orchestrating; kimi spawns lazily per session and may not even be
+# running idle. SSH / kimi probe results are returned as diagnostics.
 
 verified_at="$(now_iso)"
 
 ok="true"
-[[ "$ssh_ok"   != "true" ]] && ok="false"
-[[ "$(jq -r '.ok' <<<"$kimi_json")"  != "true" ]] && ok="false"
 [[ "$(jq -r '.ok' <<<"$plane_json")" != "true" ]] && ok="false"
 
 result=$(jq -n \
@@ -194,12 +165,8 @@ result=$(jq -n \
   --argjson ssh "{\"ok\":$ssh_ok}" \
   --argjson kimi "$kimi_json" \
   --argjson plane "$plane_json" \
-  --argjson claude "$claude_json" \
-  --argjson codex "$codex_json" \
   --arg verifiedAt "$verified_at" \
-  '{ok:$ok,name:$name,via:$via,ssh:$ssh,kimi:$kimi,plane:$plane,
-    providers:{claude:$claude,codex:$codex},
-    verifiedAt:$verifiedAt}')
+  '{ok:$ok,name:$name,via:$via,ssh:$ssh,kimi:$kimi,plane:$plane,verifiedAt:$verifiedAt}')
 
 printf '%s\n' "$result"
 

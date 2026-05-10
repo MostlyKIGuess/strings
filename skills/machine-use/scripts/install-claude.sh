@@ -67,11 +67,8 @@ export PROVISIONING_NAME
 ensure_index
 machine_exists "$NAME" || { printf '{"ok":false,"stage":"precheck","message":"no such machine: %s"}\n' "$NAME"; exit 1; }
 
-status="$(machine_field "$NAME" "status")"
-if [[ "$status" != "ready" ]]; then
-  printf '{"ok":false,"stage":"precheck","message":"machine status is %s, expected ready (run setup.sh first)"}\n' "$status"
-  exit 1
-fi
+# Reachability is checked by SSH itself when we shell out below; no need for
+# a precheck on persistent status (which we no longer carry).
 if ! ssh_master_alive "$NAME"; then
   printf '{"ok":false,"stage":"precheck","message":"SSH ControlMaster not alive; run reconnect-ssh.sh first"}\n'
   exit 1
@@ -117,12 +114,8 @@ SSH_PORT="$(machine_field "$NAME" "ssh.port")"; [[ -z "$SSH_PORT" ]] && SSH_PORT
 
 record_provider_failure() {
   local stage="$1" message="$2"
-  local ts; ts="$(now_iso)"
   index_update "$NAME" "$(cat <<JQ
     . + {
-      lastProviderError: ((.lastProviderError // {}) + {
-        claude: { stage: "$stage", message: $(jq -Rsc <<<"$message"), ts: "$ts" }
-      }),
       services: ((.services // {}) + {
         providers: ((.services.providers // {}) + {
           claude: ((.services.providers.claude // {}) + { installed: false })
@@ -278,8 +271,7 @@ index_update "$NAME" "$(cat <<JQ
           smokeTestedAt: "$ts"
         }
       })
-    }),
-    lastProviderError: ((.lastProviderError // {}) + { claude: null })
+    })
   }
 JQ
 )"

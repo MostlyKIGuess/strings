@@ -172,51 +172,39 @@ _release_lock() {
 
 # ── failure handling ─────────────────────────────────────────────────────────
 
-# Append a forensic JSON line to <name>.lasterror, then mark the machine
-# broken in the index. This is the ONLY error-exit path — every die() in
-# scripts that have set up provisioning state should go through here.
+# Append a forensic JSON line to <name>.lasterror and emit the structured
+# failure outcome on stdout. Does NOT touch index.json — live state lives in
+# the renderer's bridge probe, not the index. Forensic file remains the
+# durable trail for `tail`-style debugging.
 #
 #     mark_broken "<stage>" "<message>" '<extra-json-or-empty>'
 #
-# Extra is a JSON object (or "{}") merged into lastError. Use for
-# remoteLogTail, serviceLogs, etc.
+# Extra is a JSON object (or "{}") merged into the outcome.
 mark_broken() {
   local stage="${1:-?}" message="${2:-?}" extra="${3:-{\}}"
   local name="${PROVISIONING_NAME:-?}"
   local ts; ts="$(now_iso)"
 
-  # Recursion guard: if we get called from our own ERR trap, fall through.
   if [[ "$MARK_BROKEN_IN_PROGRESS" == "1" ]]; then
     printf '{"stage":"mark_broken","level":"fatal","msg":"mark_broken itself failed","origStage":"%s"}\n' "$stage" >&2
     exit 70
   fi
   export MARK_BROKEN_IN_PROGRESS=1
 
-  # 1) Forensic floor — single-syscall append, immune to jq failures.
+  # Forensic floor — single-syscall append, immune to jq failures.
   mkdir -p "$LASTERROR_DIR" 2>/dev/null || true
   local forensic
   forensic=$(jq -nc \
     --arg ts "$ts" --arg name "$name" --arg stage "$stage" \
     --arg message "$message" --argjson extra "$extra" \
-    '{ts:$ts,name:$name,stage:$stage,message:$message} + $extra' \
+    '{ok:false,ts:$ts,name:$name,stage:$stage,message:$message} + $extra' \
     2>/dev/null \
-    || printf '{"ts":"%s","name":"%s","stage":"%s","message":"%s"}' \
+    || printf '{"ok":false,"ts":"%s","name":"%s","stage":"%s","message":"%s"}' \
        "$ts" "$name" "$stage" "${message//\"/\\\"}")
   printf '%s\n' "$forensic" >> "$LASTERROR_DIR/$name.lasterror" 2>/dev/null || true
 
-  # 2) Atomic index update.
-  if machine_exists "$name" 2>/dev/null; then
-    index_update "$name" \
-      ". + {status:\"broken\", lastError: ($forensic)}" \
-      2>/dev/null || true
-  fi
-
-  # 3) Stdout outcome (single JSON doc, contract per spec §3).
   printf '%s\n' "$forensic"
-
-  # 4) Stderr progress line.
   emit_progress error "$stage" "$message"
-
   exit 1
 }
 

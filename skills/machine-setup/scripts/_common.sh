@@ -56,10 +56,6 @@ machine_field() {
   jq_index -r --arg n "$name" ".machines[\$n].$path // empty"
 }
 
-active_machine() {
-  jq_index -r '.active // "local"'
-}
-
 ssh_sock() {
   mkdir -p "$SSH_DIR"
   printf '%s/%s.sock' "$SSH_DIR" "$1"

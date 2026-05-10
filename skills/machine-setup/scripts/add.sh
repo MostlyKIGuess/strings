@@ -2,8 +2,9 @@
 # add.sh <name> [--from-ssh-config ALIAS] [--host H --user U --key K] [--port P]
 #                [--force]
 #
-# Registers a new machine as status:"unprovisioned". Does NOT reach out to the
-# machine — use install.sh next.
+# Registers a new machine in index.json with its ssh creds only. Does NOT
+# reach out — use install.sh next. Reachability is probed at runtime by the
+# renderer; index.json holds no live state.
 #
 # Preferred path: --from-ssh-config <alias> reads `ssh -G <alias>`.
 
@@ -119,12 +120,8 @@ entry=$(jq -n \
      },
      remote: null,
      services: { providers: {} },
-     status: "unprovisioned",
      bundleVersion: null,
      provisionedAt: null,
-     lastVerifiedAt: null,
-     lastError: null,
-     lastProviderError: { claude: null, codex: null },
      createdAt: $createdAt
    }')
 

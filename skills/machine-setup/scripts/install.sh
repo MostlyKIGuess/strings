@@ -59,10 +59,9 @@ machine_exists "$NAME" || { printf '{"ok":false,"stage":"precheck","message":"no
 index_lock "$NAME"
 trap_unhandled_errors
 
-# Mark provisioning at the start. Preserve services.providers across this update.
+# Initialize services.providers if missing (preserved across reinstalls).
 index_update "$NAME" '
-  . + { status: "provisioning", lastError: null }
-  | .services = ((.services // {}) | (.providers //= {}) | .)
+  .services = ((.services // {}) | (.providers //= {}) | .)
 '
 
 # ── stage: bundle-resolve ────────────────────────────────────────────────────
@@ -214,23 +213,20 @@ emit_progress info "verify-from-laptop" "ok (kimi=$verify_kimi plane=$verify_pla
 
 emit_progress info "index-write-success" "merging success record"
 
-# Atomic merge that PRESERVES services.providers across a reinstall (spec §4.2).
+# Atomic merge that PRESERVES services.providers across a reinstall.
 index_update "$NAME" "$(cat <<JQ
   (.services // {}) as \$svc
   | (\$svc.providers // {}) as \$prov
   | . + {
-      status: "ready",
       bundleVersion: "$bundle_version",
       provisionedAt: "$(now_iso)",
-      lastVerifiedAt: "$(now_iso)",
       remote: ((.remote // {}) + {
         home: "$remote_home",
         prefix: "$remote_prefix",
         spacesRoot: "$remote_spaces_root",
         worktreesRoot: "$remote_worktrees_root"
       }),
-      services: (\$svc + { providers: \$prov }),
-      lastError: null
+      services: (\$svc + { providers: \$prov })
     }
 JQ
 )"

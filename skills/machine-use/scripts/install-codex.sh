@@ -29,26 +29,16 @@ export PROVISIONING_NAME
 ensure_index
 machine_exists "$NAME" || { printf '{"ok":false,"stage":"precheck","message":"no such machine: %s"}\n' "$NAME"; exit 1; }
 
-status="$(machine_field "$NAME" "status")"
-if [[ "$status" != "ready" ]]; then
-  printf '{"ok":false,"stage":"precheck","message":"machine status is %s, expected ready (run install.sh first)"}\n' "$status"
-  exit 1
-fi
-
 if ! ssh_master_alive "$NAME"; then
   printf '{"ok":false,"stage":"precheck","message":"SSH ControlMaster not alive; run reconnect-ssh.sh first"}\n'
   exit 1
 fi
 
-# Helper: record a provider failure WITHOUT demoting machine state.
+# Helper: record a provider failure as installed:false. No machine-level state.
 record_provider_failure() {
   local stage="$1" message="$2"
-  local ts; ts="$(now_iso)"
   index_update "$NAME" "$(cat <<JQ
     . + {
-      lastProviderError: ((.lastProviderError // {}) + {
-        codex: { stage: "$stage", message: $(jq -Rsc <<<"$message"), ts: "$ts" }
-      }),
       services: ((.services // {}) + {
         providers: ((.services.providers // {}) + {
           codex: ((.services.providers.codex // {}) + { installed: false })
@@ -118,8 +108,7 @@ index_update "$NAME" "$(cat <<JQ
           smokeTestedAt: "$ts"
         }
       })
-    }),
-    lastProviderError: ((.lastProviderError // {}) + { codex: null })
+    })
   }
 JQ
 )"

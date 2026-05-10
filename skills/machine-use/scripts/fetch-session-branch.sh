@@ -18,7 +18,7 @@
 # Remote runs:
 #   Fetches the `osci/<sid>` branch from the remote bare into the laptop's
 #   .git, using the existing ControlMaster socket (same transport as
-#   sync-repo.sh). The remote worktree is already on that branch by design —
+#   trigger-deep-run.sh's sync step). The remote worktree is already on that branch by design —
 #   no promotion step on the remote side is needed.
 #
 # After this script succeeds, the caller runs:
@@ -57,7 +57,9 @@ done
 [[ -z "$session_id" ]] && die "--session-id is required"
 [[ -z "$path"       ]] && die "--path is required (the laptop repo root)"
 [[ -d "$path/.git" || -f "$path/.git" ]] || die "$path is not a git repo"
-[[ -z "$machine" ]] && machine="$(active_machine)"
+# --machine is required: there is no .active fallback in index.json anymore.
+# Pass "local" explicitly when claiming a laptop-side run.
+[[ -z "$machine" ]] && die "--machine is required (use \"local\" for laptop-side runs)"
 [[ -z "$branch"  ]] && branch="osci/$session_id"
 
 abs_path="$(cd "$path" && pwd)"
@@ -116,7 +118,7 @@ host="$(machine_field "$machine" "ssh.host")"; [[ -z "$host" ]] && host="$(machi
 user="$(machine_field "$machine" "ssh.user")"; [[ -z "$user" ]] && user="$(machine_field "$machine" "user")"
 port="$(machine_field "$machine" "ssh.port")"; [[ -z "$port" ]] && port="$(machine_field "$machine" "port")"; [[ -z "$port" ]] && port=22
 remote_home="$(machine_field "$machine" "remote.home")"
-[[ -z "$remote_home" ]] && die "no remote.home cached for $machine — run sync-repo.sh once first"
+[[ -z "$remote_home" ]] && die "no remote.home cached for $machine — run trigger-deep-run.sh once first to materialize it"
 
 bare="$remote_home/.openscientist/repos/$repo_id/bare.git"
 if [[ "$port" == "22" ]]; then
