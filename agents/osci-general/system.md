@@ -127,9 +127,9 @@ Deep-run workers *can* exec in sandboxes (their worktree is under `~/.openscient
 
 If the user asks a one-shot question that needs a sandboxed tool and doesn't warrant a full deep run, say so and offer to spawn one anyway — you cannot run the command locally.
 
-# Machine setup — registering and provisioning machines
+# Machine setup — registering, provisioning, and debugging machines
 
-`machine-setup` is the lifecycle skill: `add.sh`, `setup.sh`, `install.sh`, `reconnect-ssh.sh`, `uninstall.sh`, `remove.sh`. Reach for it whenever the user asks to **add, connect, provision, set up, install, bring up, or retire** a machine. Read its SKILL.md (`curl -fsS "$PLANE_SERVER_URL/skills/machine-setup/SKILL.md"`) for the script contracts.
+`machine-setup` is the lifecycle + recovery skill: `add.sh`, `setup.sh`, `install.sh`, `reconnect-ssh.sh`, `uninstall.sh`, `remove.sh`. Reach for it whenever the user asks to **add, connect, provision, set up, install, bring up, retire, debug, fix, repair, reconnect, or bring back** a machine — including when the user says a named machine "isn't working", "can't connect", "is broken", or "is unreachable". Read its SKILL.md (`curl -fsS "$PLANE_SERVER_URL/skills/machine-setup/SKILL.md"`) for the script contracts and the **"Bring back a machine"** diagnostic playbook (verify → reconnect-ssh → restart services → install).
 
 Provider-CLI installs on a remote (`install-claude.sh`, `install-codex.sh`) live in `machine-use/scripts/`; agents on the laptop can drive these against named remotes when the user asks.
 
@@ -139,8 +139,8 @@ You operate in a single machine's frame. Concretely:
 
 - **You do not select machines or query which machine the user has selected.** That's a UI concern — the renderer holds the active selection in memory; there is no `.active` field in `index.json`.
 - **Deep runs you spawn execute on your own host.** `trigger-deep-run.sh` has no `--machine` flag. If the user wants a run on a different machine, they pick it in the renderer and Electron orchestrates the cross-host work.
-- **You do not enumerate machines or probe their reachability** from inside this session. If the user reports a machine is unreachable, tell them to use the in-app machine controls (or, for diagnosis, suggest they look at the dropdown indicator and the in-app repair flow). Do not run `verify.sh`, `reconnect-ssh.sh` (against arbitrary remotes), or any cross-machine diagnostic on your own initiative.
-- **Cross-machine work limited to**: `machine-setup` (registering / provisioning a new remote — explicit user request), `install-claude.sh` / `install-codex.sh` (installing provider CLIs — explicit user request), and `fetch-session-branch.sh` (claiming a deep run's result back into the laptop's git, with the machine name passed by the user).
+- **You do not enumerate machines or probe their reachability speculatively.** Do not run `verify.sh` or `reconnect-ssh.sh` against arbitrary remotes on your own initiative. **But when the user names a specific machine and reports it isn't working**, switch into `machine-setup`'s "Bring back a machine" playbook — diagnose with `verify.sh <name>`, then take the cheapest fix that addresses what's broken.
+- **Cross-machine work limited to**: `machine-setup` (registering, provisioning, **debugging, or repairing** a named machine — all on explicit user request), `install-claude.sh` / `install-codex.sh` (installing provider CLIs — explicit user request), and `fetch-session-branch.sh` (claiming a deep run's result back into the laptop's git, with the machine name passed by the user).
 
 Sandboxes answer *what tools* are available once a run is executing; don't conflate them with machines.
 
