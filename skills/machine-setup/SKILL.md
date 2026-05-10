@@ -169,27 +169,44 @@ This file is **immune to jq failures and disk-write contention** — it's writte
 
 ### Bring back a machine
 
-When a machine the user used before is no longer reachable (renderer shows amber dot, "Plane unreachable"), use **`verify.sh`** as the diagnosis primitive — it tells you which layer broke. Choose the cheapest fix that covers what's broken:
+**Trigger phrases.** Enter this playbook whenever the user names a specific machine and says any of: "isn't working", "can't connect", "is broken", "unreachable", "down", "won't talk to me", "fix \<name\>", "debug \<name\>", "repair \<name\>", "bring back \<name\>", "reconnect \<name\>". Do **not** start this playbook on your own initiative — the renderer has its own boot probe and dropdown indicator; speculating that a machine is broken without the user saying so is out-of-frame.
+
+**Diagnosis primitive: `verify.sh`.** Run it first; it tells you which layer broke. Then choose the cheapest fix.
 
 ```bash
-# 1. Diagnose. verify.sh gates on plane reachability; ssh + kimi results are
-#    diagnostics in the same JSON.
 SCRIPTS_USE=${KIMI_WORK_DIR}/.openscientist/skills/machine-use/scripts
-out=$(bash $SCRIPTS_USE/verify.sh osci-math)
-printf '%s\n' "$out" | jq '{ok, ssh:.ssh.ok, kimi:.kimi.ok, plane:.plane.ok, via, lastError:.message}'
+SCRIPTS_SETUP=${KIMI_WORK_DIR}/.openscientist/skills/machine-setup/scripts
+NAME=osci-math
+
+out=$(bash $SCRIPTS_USE/verify.sh "$NAME")
+printf '%s\n' "$out" | jq '{ok, ssh:.ssh.ok, kimi:.kimi.ok, plane:.plane.ok, via, message}'
 ```
 
-Map the result to the right fix:
+Map the result to the right fix. **`verify.sh` gates on plane reachability** — `ok:false` always means plane failed; `ssh` and `kimi` results in the same JSON tell you where to look upstream.
 
-| Symptom from `verify.sh` | Layer that's broken | Fix |
+| Symptom from `verify.sh` | What's broken | Cheapest fix |
 |---|---|---|
-| `ssh.ok = false` | SSH ControlMaster died | `bash $SCRIPTS_SETUP/reconnect-ssh.sh osci-math` (cheap, no remote work). |
-| `ssh.ok = true`, `plane.ok = false` | Plane process dead on remote | `ssh osci-math 'systemctl --user restart plane.service kimi.service'`. Wait 5 s, re-run verify.sh. |
-| Plane still down after restart | systemd unit broken or bundle corrupt | `bash $SCRIPTS_SETUP/install.sh osci-math` — re-deploys the bundle and rewrites the systemd units. Preserves `services.providers`. |
-| `verify.sh` itself errors with `no such machine` | Index entry missing — remote was wiped or the user removed the entry | `bash $SCRIPTS_SETUP/setup.sh osci-math` — full register + install. Needs `~/.ssh/config` entry or explicit `--host/--user/--key`. |
-| Auth-related errors in remote logs (`401`, "missing token") | `~/.openscientist/auth.json` on remote is stale or missing | `bash $SCRIPTS_SETUP/install.sh osci-math` — the auth-copy stage re-syncs. Don't ask the user to re-login. |
+| `ok:false`, `ssh.ok:false` | SSH ControlMaster died or never opened. | `bash $SCRIPTS_SETUP/reconnect-ssh.sh "$NAME"` (no remote work; idempotent). Re-run verify. |
+| `ok:false`, `ssh.ok:true`, `plane.ok:false` | Plane process not responding on remote. | `ssh "$NAME" 'systemctl --user restart plane.service kimi.service'`. Wait ~5 s. Re-run verify. |
+| Plane still down after the restart above | systemd unit broken, bundle corrupt, or auth missing. | `bash $SCRIPTS_SETUP/install.sh "$NAME"` — re-rsyncs the bundle, re-syncs `auth.json`, rewrites the systemd units, runs `verify.sh` as its last gate. Preserves `services.providers`. ~5 min cold. |
+| `verify.sh` exits 2 with `no such machine` | Index entry missing — user removed it or this is a fresh shell. | `bash $SCRIPTS_SETUP/setup.sh "$NAME"` — full register + install. Needs `~/.ssh/config` entry or explicit `--host/--user/--key`. |
+| `ok:true` but the user says chat / sync still fails | Machine is reachable, but plane's upstream dependency (the SPOT backend at the remote's `auth.json` `base_url`) is failing. | Re-run with the deep probe: `bash $SCRIPTS_USE/verify.sh "$NAME" --deep`. Read the new `backend.*` block — it tells you exactly which upstream layer is broken (see the table below). |
+| `ok:true` but the user reports an unrelated runtime issue (provider CLI, task payload) | Not a machine layer problem at all. | Read `ssh "$NAME" 'journalctl --user -u kimi -u plane -n 100'` for service-level errors. For provider-CLI errors, read `~/.openscientist/machines/<name>.lasterror` (bottom line is most recent). |
 
-`SCRIPTS_SETUP=${KIMI_WORK_DIR}/.openscientist/skills/machine-setup/scripts`. After any fix, re-run `verify.sh` to confirm `ok=true`. Do not assume the renderer's dot will flip immediately — the periodic probe runs every 20 s.
+**Deep probe — when `--deep` adds `backend.*` to the output:** `verify.sh` by default checks only that plane is *running*. With `--deep`, it additionally tests plane's upstream dependency: the SPOT backend the remote's `auth.json` points at. The `backend` block carries two extra signals:
+
+| `backend.reachableFromRemote` | `backend.authValid` | What's wrong | Fix |
+|---|---|---|---|
+| `false` (502/503/521/522/523/524/000) | (anything) | SPOT cloud backend is **down or unreachable from the remote**. Network or hosted outage. | Not your job to fix. Tell the user the cloud backend is down (`backend.statusCode` and `backend.message` carry the detail). Suggest they retry in a few minutes or check status. |
+| `true` | `false` (401/403) | The remote's auth token is **expired or invalid**. | `bash $SCRIPTS_SETUP/install.sh "$NAME"` — the auth-copy stage re-syncs the laptop's current `auth.json` (with `base_url` rewritten to the cloud) into the remote, mode 600. Plane re-reads auth per request; no restart needed. |
+| `true` | `null` (no token, status 000) | Remote `auth.json` is missing/empty or there's a network blip mid-probe. | If `backend.message` says "no auth.json" or "no token" → `install.sh` re-syncs. If it says "backend unreachable" → transient; re-run `--deep`. |
+| `true` | `true` | Backend is fine, auth is fine. The user's complaint is downstream of the machine — provider CLI, task payload, or something inside the run itself. | Look at remote service logs (`ssh "$NAME" 'journalctl --user -u kimi -u plane -n 100'`) and the session's `meta.json` / `stdout.log` under `~/.kimi/plane/sessions/<sid>/`. |
+
+**After any fix**, re-run `verify.sh` and confirm `ok:true`. The renderer's dropdown indicator updates on its next 20 s probe, not immediately — tell the user this so they don't think the fix didn't take.
+
+**Telling the user what you found.** When you report back, say (a) which layer was broken (ssh / plane / install / auth), (b) what you ran, (c) the verify result. Don't paste raw JSON — summarize.
+
+**When to give up and ask.** If `install.sh` fails twice in a row with the same `<name>.lasterror` stage, stop. Read the forensic line, summarize the failure, and ask the user how they want to proceed (skip / retry / re-add / replace the remote). Don't keep retrying — that just burns time and obscures the root cause.
 
 ### Retire a machine
 
