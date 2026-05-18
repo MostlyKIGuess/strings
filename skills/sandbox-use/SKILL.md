@@ -1,6 +1,6 @@
 ---
 name: sandbox-use
-description: Manage Docker sandbox containers for the OpenScientist agent stack — the isolated execution environments agents reach for when they need a tool that isn't on the host (Lean, pinned Python, custom toolchains). Multiple sandboxes can be running concurrently. There is no global "active" sandbox — `exec.sh --sandbox <id>` is required, and "active for path P" is a derived predicate (container running AND P falls under one of its current bind-mount targets). The frontend's brick-button dropdown drives activation/deactivation per-space; agents can also self-activate via `activate.sh <id>` (with optional `--mount <abs-path>` to add a same-path bind beyond the canonical `~/.openscientist`). Workdir transparency holds for any host path that's currently bound — `exec.sh` defaults `--workdir` to `$PWD` and refuses with exit 126 if `$PWD` isn't under any of the target container's bind targets. Use this skill whenever you need to run a command that requires a sandbox-resident tool, or to check which sandbox is bound to a given host path. Adding/pulling/removing sandboxes still lives in higher layers (the Electron app's `POST /sandbox/add`); `activate.sh` errors cleanly if the sandbox isn't already in the index.
+description: Manage Docker sandbox containers for the OpenScientist agent stack — the isolated execution environments deep-run workers reach for when they need a tool that isn't on the host (Lean, pinned Python, custom toolchains). Multiple sandboxes can be running concurrently. There is no global "active" sandbox — `exec.sh --sandbox <id>` is required, and "active for path P" is a derived predicate (container running AND P falls under one of its current bind-mount targets). Agents read this playbook with `$PLANE_TOOL_BIN skill-view sandbox-use/SKILL.md` and run scripts with `$PLANE_TOOL_BIN skill-run sandbox-use/scripts/<script>.sh ...`; plane-server resolves the skill path and the script still executes with the agent's cwd/env/stdio. Deep-run workers activate sandboxes with `activate.sh <id>` (with optional `--mount <abs-path>` to add a same-path bind beyond the canonical `~/.openscientist`). Workdir transparency holds for any host path that's currently bound — `exec.sh` defaults `--workdir` to `$PWD` and refuses with exit 126 if `$PWD` isn't under any of the target container's bind targets. Use this skill whenever a deep-run worker needs to run a command that requires a sandbox-resident tool, or to check which sandbox is bound to a given host path. Adding/pulling/removing sandboxes still lives in higher layers (the Electron app's `POST /sandbox/add`); `activate.sh` errors cleanly if the sandbox isn't already in the index.
 metadata:
   skill-author: OpenScientist
 category: execution
@@ -45,11 +45,11 @@ Inside a bound directory, calling `exec.sh` feels like running the command on th
 
 ```bash
 $ cd ~/.openscientist/sessions/abc/worktrees/w1     # under canonical mount
-$ bash $SCRIPTS/exec.sh --sandbox math -- pwd
+$ "$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/exec.sh --sandbox math -- pwd
 /home/zeero/.openscientist/sessions/abc/worktrees/w1   # matches host PWD
 
-$ bash $SCRIPTS/exec.sh --sandbox math -- cat math.txt          # relative — works
-$ bash $SCRIPTS/exec.sh --sandbox math --command 'ls > out.txt' # redirect — works via --command
+$ "$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/exec.sh --sandbox math -- cat math.txt
+$ "$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/exec.sh --sandbox math --command 'ls > out.txt'
 $ cat out.txt                                                   # host sees the sandbox's write
 ```
 
@@ -132,52 +132,55 @@ Every script sources `_common.sh`, which provides:
 - `interp <string>` — substitute `$SPOT_HOST_MOUNT` / `$SPOT_HOST_UID` / `$SPOT_HOST_GID`.
 - `active_sandbox` — DEPRECATED; reads the legacy `.active` field. Callers should use `container_bindings` plus `container_running` instead.
 
-## Workflows
+## How to invoke scripts
 
-After world-model sync, scripts land under `${KIMI_WORK_DIR}/.openscientist/skills/sandbox-use/scripts/`.
+Use plane-server's skill commands. Do not construct local skill paths by hand.
 
 ```bash
-SCRIPTS=${KIMI_WORK_DIR}/.openscientist/skills/sandbox-use/scripts
+"$PLANE_TOOL_BIN" skill-view sandbox-use/SKILL.md
+"$PLANE_TOOL_BIN" skill-run  sandbox-use/scripts/<script>.sh [args...]
 ```
 
-Always prefix invocations with `bash` — sync does not preserve the executable bit.
+`skill-run` asks plane-server to resolve the skill file, then execs the script with the caller's cwd, environment, stdio, and exit code preserved. That means `_common.sh` sibling sourcing, `$PWD` workdir checks, and Docker output behave as if you ran the resolved script directly, while still getting global/space override resolution from plane.
+
+This is not an MCP path. The scripts below use the local Docker CLI directly after plane resolves and launches them.
+
+## Workflows
 
 ### Run a command in a sandbox bound to your CWD
 
-The common path. The frontend has typically already activated the sandbox for the user's space; agents just exec into it.
+The common deep-run path is: inspect installed sandboxes, activate the chosen sandbox from the worker, then exec into it.
 
 ```bash
-bash $SCRIPTS/list.sh                                    # see what's installed + live state
-bash $SCRIPTS/active.sh "$KIMI_WORK_DIR"                 # which sandboxes are bound to my CWD?
-bash $SCRIPTS/exec.sh --sandbox math -- lake build       # run inside math
+"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/list.sh
+"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/active.sh "$KIMI_WORK_DIR"
+"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/exec.sh --sandbox math -- lake build
 ```
 
-### Self-activate from an agent (Trigger 2)
+### Activate with an extra mount
 
-When the frontend hasn't picked a sandbox and the agent realizes it needs one (e.g. it sees a `.lean` file and wants the math toolchain), it can activate the sandbox itself with its own work_dir as the bind:
+When a worker's cwd is outside the canonical `~/.openscientist` mount, activate the sandbox with the work directory as an additional same-path bind:
 
 ```bash
-bash $SCRIPTS/activate.sh math --mount "$KIMI_WORK_DIR"
-bash $SCRIPTS/exec.sh --sandbox math -- lake build
+"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/activate.sh math --mount "$KIMI_WORK_DIR"
+"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/exec.sh --sandbox math -- lake build
 ```
-
-If the user later picks a different sandbox via the UI, that one gets recreated for the new selection independently — Trigger 2's container keeps running for its current work_dir.
 
 ### Deep-run agents (Trigger 3)
 
 A deep-run agent's CWD is under `~/.openscientist/worktrees/...`, which is always covered by the canonical mount. So:
 
 ```bash
-bash $SCRIPTS/activate.sh math       # no --mount needed
-bash $SCRIPTS/exec.sh --sandbox math -- lake build
+"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/activate.sh math
+"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/exec.sh --sandbox math -- lake build
 ```
 
-`activate.sh` with no `--mount` is permissive: if `math` is already running with a UI-driven binding for some other space, it's reused as-is (the canonical mount is always there, so the deep run gets what it needs without disturbing the user's session). If `math` was stopped, it's started with canonical-only binds.
+`activate.sh` with no `--mount` is permissive: if `math` is already running, it is reused as-is; the canonical mount is always there, so deep-run worktrees under `~/.openscientist/worktrees/...` are covered. If `math` was stopped, it is started with canonical-only binds.
 
 ### Deactivate a sandbox
 
 ```bash
-bash $SCRIPTS/deactivate.sh math    # docker stop
+"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/deactivate.sh math
 ```
 
 Other running sandboxes are untouched. There's no "the active one" to clear.
@@ -218,10 +221,10 @@ Live state is derived on every read, so there's no `index.json` ↔ Docker drift
 | Symptom | First check | Fix |
 |---|---|---|
 | `exec.sh` exits 1 with "--sandbox required" | You forgot the flag | All exec calls now require `--sandbox <id>` explicitly. |
-| `exec.sh` exits 125 | `bash $SCRIPTS/status.sh <id>` | The container isn't running — `activate.sh <id>` (add `--mount $PWD` if your CWD is outside the canonical mount). |
+| `exec.sh` exits 125 | `"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/status.sh <id>` | The container isn't running — run `activate.sh <id>` through `skill-run` (add `--mount $PWD` if your CWD is outside the canonical mount). |
 | `exec.sh` exits 126 | The banner enumerates the container's live binds | `cd` to a path under one of those binds, or run the suggested `activate.sh <id> --mount …`. |
-| `activate.sh` errors "no such sandbox" | `bash $SCRIPTS/list.sh` | Sandbox isn't installed. Use the Electron app's `POST /sandbox/add` flow. |
-| `activate.sh` fails with "docker run failed" | `bash $SCRIPTS/show.sh <id>` for the spec; the failure prints stderr verbatim | Usually a missing image (pull manually with `docker pull <image>`) or a bad bind source (e.g. host path doesn't exist). |
+| `activate.sh` errors "no such sandbox" | `"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/list.sh` | Sandbox isn't installed. Use the Electron app's `POST /sandbox/add` flow. |
+| `activate.sh` fails with "docker run failed" | `"$PLANE_TOOL_BIN" skill-run sandbox-use/scripts/show.sh <id>` for the spec; the failure prints stderr verbatim | Usually a missing image (pull manually with `docker pull <image>`) or a bad bind source (e.g. host path doesn't exist). |
 | Container writes land as root on the host | `docker inspect spot-sandbox-<id> --format '{{.Config.User}}'` | Image hardcodes a uid in its default user. `activate.sh` passes `--user $HOST_UID:$HOST_GID` — if this is being overridden, the image is broken. |
 | `$HOME` inside exec isn't the host home | Expected. | The container's `$HOME` comes from its own `/etc/passwd`. Never expand `~` in commands you pass to `exec.sh`. |
 
